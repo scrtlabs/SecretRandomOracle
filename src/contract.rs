@@ -35,7 +35,15 @@ pub enum HandleMsg {
     GetRandom {
         bytes: u64,
         callback_address: HumanAddr,
+        callback_input: Binary,
     },
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct RandomAnswer {
+    RandomBytes: Binary,
+    Input: Binary,
 }
 
 pub fn handle<S: Storage, A: Api, Q: Querier>(
@@ -45,14 +53,19 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
 ) -> HandleResult {
     match msg {
         HandleMsg::AddEntropy { entropy } => {
-            let mut current_seed = deps.storage.get(b"seed").unwrap();
-            current_seed.extend(entropy.0);
-            let new_seed: [u8; 32] = Sha256::digest(&current_seed).into();
+            let mut seed = deps.storage.get(b"seed").unwrap();
+            seed.extend(entropy.0);
+            seed.extend(env.message.sender.as_slice().to_vec());
+            seed.extend(env.block.chain_id.as_bytes().to_vec());
+            seed.extend(&env.block.height.to_be_bytes());
+            seed.extend(&env.block.time.to_be_bytes());
+            let new_seed: [u8; 32] = Sha256::digest(&seed).into();
             deps.storage.set(b"seed", &new_seed);
         }
         HandleMsg::GetRandom {
             bytes,
             callback_address,
+            callback_input,
         } => {
             let mut seed = deps.storage.get(b"seed").unwrap();
             let rng = ChaChaRng::from_seed(seed);
@@ -62,16 +75,25 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
                 dest[i] = rng.gen();
             }
 
+            seed.extend(callback_address.0.as_bytes());
+            seed.extend(callback_input.0);
+            seed.extend(env.message.sender.as_slice().to_vec());
+            seed.extend(env.block.chain_id.as_bytes().to_vec());
+            seed.extend(&env.block.height.to_be_bytes());
+            seed.extend(&env.block.time.to_be_bytes());
+            let new_seed: [u8; 32] = Sha256::digest(&seed).into();
+            deps.storage.set(b"seed", &new_seed);
+
+            let answer: RandomAnswer = RandomAnswer {
+                RandomBytes: Binary(dest),
+                Input: callback_input,
+            };
+
             return Ok(HandleResponse {
                 messages: vec![CosmosMsg::Wasm(WasmMsg::Execute {
                     send: vec![],
                     contract_addr: callback_address.clone(),
-                    msg: Binary(
-                        // TODO figure out the best UX for this interface
-                        r#"{"contract_error":{"error_type":"generic_err"}}"#
-                            .as_bytes()
-                            .to_vec(),
-                    ),
+                    msg: Binary(serde_json_wasm::to_vec(&answer).unwrap()),
                 })],
                 log: vec![],
                 data: None,
